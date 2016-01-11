@@ -44,10 +44,11 @@ hh.prototype.getAuthorizationURL = function (userID) {
     });
 };
 
-hh.prototype.createUser = function (userID, token) {
+hh.prototype.createUser = function (userID, rawToken) {
     console.log('Creating user: ' + userID);
+    var self = this;
     return new Promise(function (resolve, reject) {
-        User.create({_id: userID, token: token}, function (err, user) {
+        User.create({_id: userID, token: self.serializedToken(rawToken)}, function (err, user) {
             if (err)
                 return reject(err);
             resolve({ok: 1, nInserted: 1, n: 1});
@@ -55,15 +56,35 @@ hh.prototype.createUser = function (userID, token) {
     });
 };
 
-hh.prototype.updateUserAuthorization = function (userID, newToken) {
+hh.prototype.updateUserAuthorization = function (userID, newRawToken) {
     console.log('Updating user: ' + userID);
-    return User.update({_id: userID}, {$set: {token: newToken}}).exec();
+    return User.update({_id: userID}, {$set: {token: this.serializedToken(newRawToken)}}).exec();
 };
 
-hh.prototype.updatedToken = function (userID, newToken) { // TODO: Duplicate
-    return User.update({_id: userID}, {$set: {token: newToken}}).exec()
+hh.prototype.serializedToken = function (token) {
+    var result = util._extend({}, token); // cloning token object
+    if ('expires_in' in result) {
+        result.expires_at = new Date(Date.now() + result.expires_in * 1000).toISOString();
+        delete result.expires_in;
+    }
+    return result;
+};
+
+hh.prototype.deserializedToken = function (token) {
+    if ('expires_at' in token) {
+        var expireDateMilliseconds = new Date(token.expires_at).valueOf();
+        token.expires_in = Math.round((expireDateMilliseconds - Date.now()) / 1000);
+        if (token.expires_in < 0)
+            token.expires_in = 0;
+    }
+    return this.oauth2.accessToken.create(token);
+};
+
+hh.prototype.updatedToken = function (userID, newRawToken) { // TODO: Duplicate
+    var serializedToken = this.serializedToken(newRawToken);
+    return User.update({_id: userID}, {$set: {token: serializedToken}}).exec()
         .then(function (updateStatus) {
-            return newToken;
+            return serializedToken;
         });
 };
 
@@ -72,11 +93,11 @@ hh.prototype.getToken = function (userID) {
     return User.findOne({_id: userID}).exec()
         .then(function (user) {
             if (user) {
-                var token = self.oauth2.accessToken.create(user.token);
+                var token = self.deserializedToken(user.token);
                 if (token.expired()) {
                     return token.refresh()
-                        .then(function (newToken) {
-                            return self.updatedToken(userID, newToken);
+                        .then(function (rawToken) {
+                            return self.updatedToken(userID, rawToken);
                         })
                 }
                 else
@@ -87,14 +108,14 @@ hh.prototype.getToken = function (userID) {
         });
 };
 
-hh.prototype.saveToken = function (userID, token) {
+hh.prototype.saveToken = function (userID, rawToken) {
     var self = this;
     return User.findOne({_id: userID}).exec()
         .then(function (user) {
             if (user)
-                return self.updateUserAuthorization(userID, token);
+                return self.updateUserAuthorization(userID, rawToken);
             else
-                return self.createUser(userID, token);
+                return self.createUser(userID, rawToken);
         });
 };
 
@@ -105,10 +126,10 @@ hh.prototype.authorizeUser = function (userID, code) {
             redirect_uri: config.redirect_uri + '?user=' + userID,
             grant_type: 'authorization_code'
         })
-        .then(function (token) {
-            if (token.error)
-                throw new errors.TokenError(token);
-            return self.saveToken(userID, token);
+        .then(function (rawToken) {
+            if (rawToken.error)
+                throw new errors.TokenError(rawToken);
+            return self.saveToken(userID, rawToken);
         });
 };
 
