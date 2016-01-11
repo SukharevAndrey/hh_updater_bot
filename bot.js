@@ -219,6 +219,9 @@ var handleTimeSelection = function (userID, rawTimesMessage) {
             .catch(function (error) {
                 console.error(error);
                 errors.handleCommon(error, userID, bot, "Ошибка отключения автообновления. Попробуйте позже.");
+            })
+            .finally(function() {
+                stateManager.setState(userID, 'start');
             });
     }
 
