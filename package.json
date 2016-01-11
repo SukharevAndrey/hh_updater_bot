@@ -1,0 +1,19 @@
+{
+  "name": "hh_bot",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "start": "node ./app.js"
+  },
+  "dependencies": {
+    "agenda": "^0.7.6",
+    "bluebird": "^3.1.1",
+    "express": "^4.13.3",
+    "moment-timezone": "^0.5.0",
+    "mongoose": "^4.3.5",
+    "node-telegram-bot-api": "^0.19.0",
+    "request-promise": "^1.0.2",
+    "simple-oauth2": "^0.3.0",
+    "underscore": "^1.8.3"
+  }
+}
