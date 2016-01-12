@@ -22,6 +22,9 @@ var config = {
     botToken: '<bot_token_from_botfather>',
     adminUserID: 12345678, // User who have an access to bot's admin commands
 
+    // Google API
+    googleApiKey: '<google_api_key>', // required for time zone detection
+
     // HeadHunter API
     clientID: '<hh_app_client_id>',
     clientSecret: '<hh_app_client_secret>',
