@@ -73,6 +73,8 @@ var authorizeUser = function (req, res) {
 
 app.get('/auth', authorizeUser);
 
+// TODO: Handle 404 and server errors
+
 app.listen(config.webPort);
 console.log('Web server started on port ' + config.webPort);
 

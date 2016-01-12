@@ -7,8 +7,10 @@ var util = require('util');
 
 var config = require('./config');
 var HeadHunter = require('./api/hh');
+var Google = require('./api/google');
 var Scheduler = require('./schedule/scheduler');
 var StateManager = require('./util/state');
+var User = require('./models/user');
 var timeUtil = require('./util/time');
 var errors = require('./errors');
 
@@ -17,6 +19,7 @@ var botOptions = {
 };
 
 var hh = new HeadHunter();
+var google = new Google(config.googleApiKey);
 var bot = new TelegramBot(config.botToken, botOptions);
 var scheduler = new Scheduler(config.mongoPath, bot);
 var stateManager = new StateManager();
@@ -69,26 +72,35 @@ var getTimeMessage = function (resume) {
     return response;
 };
 
-var getResumeInfo = function (resume, resumeNum) {
+var getUserTimeZone = function (userID) { // TODO: Move somewhere else?
+    return User.findOne({_id: userID}).exec()
+        .then(function (user) {
+            return user.timeZone;
+        });
+};
+
+var getResumeInfo = function (userID, resume, resumeNum) {
     var num = resumeNum;
 
     return scheduler.getResumeScheduleTimes(resume.id)
         .then(function (times) {
-            // TODO: User defined timezone
-            var info = util.format('%d. [%s](%s) (%s):\n', num + 1, resume.title, resume.url, resume.city);
-            var prettyDate = moment.tz(resume.last_update, "Europe/Moscow").format('D MMMM YYYY г. в HH:mm');
-            info += "Последнее обновление: _" + prettyDate + "_\n";
+            return getUserTimeZone(userID)
+                .then(function (timeZone) {
+                    var info = util.format('%d. [%s](%s) (%s):\n', num + 1, resume.title, resume.url, resume.city);
+                    var prettyDate = moment.tz(resume.last_update, timeZone).format('D MMMM YYYY г. в HH:mm');
+                    info += "Последнее обновление: _" + prettyDate + "_\n";
 
-            if (times.length === 0)
-                info += '*Автоматическое обновление отключено*';
-            else {
-                var prettyTimes = [];
-                for (var i = 0; i < times.length; i++) {
-                    prettyTimes.push(moment.tz(times[i], "Europe/Moscow").format('D MMMM HH:mm'));
-                }
-                info += '*Ближайшие обновления*: ' + prettyTimes.join(', ');
-            }
-            return info;
+                    if (times.length === 0)
+                        info += '*Автоматическое обновление отключено*';
+                    else {
+                        var prettyTimes = [];
+                        for (var i = 0; i < times.length; i++) {
+                            prettyTimes.push(moment.tz(times[i], timeZone).format('D MMMM HH:mm'));
+                        }
+                        info += '*Ближайшие обновления*: ' + prettyTimes.join(', ');
+                    }
+                    return info;
+                })
         });
 };
 
@@ -220,23 +232,26 @@ var handleTimeSelection = function (userID, rawTimesMessage) {
                 console.error(error);
                 errors.handleCommon(error, userID, bot, "Ошибка отключения автообновления. Попробуйте позже.");
             })
-            .finally(function() {
+            .finally(function () {
                 stateManager.setState(userID, 'start');
             });
     }
 
     parseTimes(rawTimesMessage)
         .then(function (times) {
-            // TODO: Get user's timezone from database
-            scheduler.scheduleUpdates(userID, resumeID, times, 'Europe/Moscow')
-                .then(function (scheduledUpdatesCount) {
-                    var timesString = times.join(', ');
-                    console.log(util.format('%d scheduled %d updates: %s', userID, scheduledUpdatesCount, timesString));
-                    var response = "Теперь ваше резюме будет автоматически обновляться каждый день в " + timesString;
-                    response += "\nЕсли резюме не сможет быть обновлено по расписанию, вам будет прислано сообщение.";
-                    stateManager.setState(userID, 'start');
-                    return bot.sendMessage(userID, response, keyboardHideParams);
-                })
+            return getUserTimeZone(userID)
+                .then(function (timeZone) {
+                    scheduler.scheduleUpdates(userID, resumeID, times, timeZone)
+                        .then(function (scheduledUpdatesCount) {
+                            var timesString = times.join(', ');
+                            console.log(util.format('%d scheduled %d updates: %s', userID, scheduledUpdatesCount, timesString));
+                            var response = "Теперь ваше резюме будет автоматически обновляться каждый день в " + timesString;
+                            response += "\nЕсли резюме не сможет быть обновлено по расписанию, вам будет прислано сообщение.";
+                            stateManager.setState(userID, 'start');
+                            return bot.sendMessage(userID, response, keyboardHideParams);
+                        })
+                });
+
         })
         .catch(errors.TimeFormatError, function (error) {
             console.error(error);
@@ -255,6 +270,42 @@ var handleTimeSelection = function (userID, rawTimesMessage) {
         .catch(function (error) {
             console.error(error);
             errors.handleCommon(error, userID, bot);
+            // TODO: reset state?
+        });
+};
+
+var handleTimeZoneSelection = function (userID, location) {
+    google.getTimeZone(location.latitude, location.longitude)
+        .then(function (response) {
+            return JSON.parse(response);
+        })
+        .then(function (tzInfo) {
+            console.log(util.format('User %d has chosen time zone %s, status: %s', userID, tzInfo.timeZoneId, tzInfo.status));
+            switch (tzInfo.status) {
+                case 'OK':
+                    return User.update({_id: userID}, {$set: {timeZone: tzInfo.timeZoneId}}).exec()
+                        .then(function (updateInfo) {
+                            if (updateInfo.n === 0)
+                                throw new errors.UserError('user ' + userID + ' not found');
+                            var abbr = 'UTC' + moment().tz(tzInfo.timeZoneId).format('Z (z)');
+                            stateManager.setState(userID, 'start');
+                            // TODO: warn about existing update jobs
+                            var response = util.format("Вы выбрали часовой пояс %s. Показ и ввод времени теперь осуществляется в этом часовом поясе.", abbr);
+                            return bot.sendMessage(userID, response);
+                        });
+                case 'OVER_QUERY_LIMIT':
+                    stateManager.setState(userID, 'start');
+                    return bot.sendMessage(userID, "Смена часового пояса временно недоступна. Повторите попытку завтра.");
+                case 'ZERO_RESULTS':
+                    return bot.sendMessage(userID, "Не удалось определить часовой пояс в заданном местоположении.");
+                default:
+                    return bot.sendMessage(userID, "Ошибка обработки местоположения. Для отмены выбора часового пояса введите /cancel.");
+            }
+        })
+        .catch(function (error) {
+            console.error(error);
+            errors.handleCommon(error, userID, bot, "Ошибка обработки местоположения.");
+            // TODO: reset state?
         });
 };
 
@@ -288,7 +339,7 @@ bot.onText(/\/resumes/, function (msg) {
                 var infoPromises = [];
                 for (var i = 0; i < resumes.length; i++) {
                     var resume = resumes[i];
-                    infoPromises.push(getResumeInfo(resume, i));
+                    infoPromises.push(getResumeInfo(userID, resume, i));
                 }
                 return Promise.all(infoPromises)
                     .then(function (infos) {
@@ -336,7 +387,9 @@ bot.onText(/\/manageupdates/, function (msg) {
 
 bot.onText(/\/timezone/, function (msg) {
     var userID = msg.from.id;
-    bot.sendMessage(userID, "Пока не реализовано. Ваши резюме будут обновляться по московскому времени.");
+    stateManager.setState(userID, 'time zone selection');
+    // TODO: Show current time zone
+    bot.sendMessage(userID, "Чтобы сменить часовой пояс, отправьте местоположение. Это можно сделать из меню в виде скрепки.\nДля отмены отправьте /cancel.");
 });
 
 bot.onText(/\/help/, function (msg) {
@@ -371,8 +424,25 @@ bot.on('text', function (msg) {
         case "time selection":
             handleTimeSelection(userID, msg.text);
             break;
+        case "time zone selection":
+            // TODO: parse user input and convert city to time zone
+            bot.sendMessage(userID, "Необходимо послать местоположение.");
+            break;
         default:
             console.error('unknown state');
+            break;
+    }
+});
+
+bot.on('location', function (msg) {
+    console.log(util.format('Received location %s from user %d', JSON.stringify(msg.location), msg.from.id));
+    var userID = msg.from.id;
+
+    switch (stateManager.getState(userID)) {
+        case "time zone selection":
+            handleTimeZoneSelection(userID, msg.location);
+            break;
+        default:
             break;
     }
 });
